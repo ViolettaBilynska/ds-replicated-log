@@ -1,0 +1,39 @@
+version: '3.10'
+
+networks:
+  replicated-network:
+    driver: bridge
+
+services:
+  master:
+    build:
+      context: .
+      dockerfile: src/master/Dockerfile
+    environment:
+    - SECONDARIES=http://secondary1:8001,http://secondary2:8002
+    ports:
+      - "5000:5000"
+    networks:
+      - replicated-network
+
+  secondary1:
+    build:
+      context: .
+      dockerfile: src/secondary/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - SECONDARY_PORT=8001
+    networks:
+      - replicated-network
+
+  secondary2:
+    build:
+      context: .
+      dockerfile: src/secondary/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - SECONDARY_PORT=8002
+    networks:
+      - replicated-network
