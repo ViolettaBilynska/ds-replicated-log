@@ -1,5 +1,6 @@
 import os
-import time
+import asyncio
+import random
 from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -27,9 +28,10 @@ async def get_messages():
 
 @app.post("/replicate/", response_model=Message)
 async def replicate_message(message: Message):
-    time.sleep(5)
+    delay = random.uniform(0.5, 3.0)
+    await asyncio.sleep(delay)
     replicated_messages.append(message.content)
-    logger.info(f"Replicated message: {message.content}")
+    logger.info(f"Replicated message: {message.content} with a delay of {delay}s")
     return message
 
 

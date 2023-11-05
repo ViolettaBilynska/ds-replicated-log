@@ -8,6 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/secondary/secondary.py secondary.py
 COPY src/ src/
 
-# EXPOSE 8001 ?
-
 CMD uvicorn secondary:app --host 0.0.0.0 --port $SECONDARY_PORT
