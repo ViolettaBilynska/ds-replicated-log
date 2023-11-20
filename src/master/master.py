@@ -12,6 +12,7 @@ messages = []
 sequence_id = 0
 
 SECONDARIES = os.environ.get("SECONDARIES", "").split(',')
+HEALTH_CHECK_INTERVAL = 10
 
 secondary_health = {secondary: "Unknown" for secondary in SECONDARIES}
 
@@ -79,16 +80,15 @@ async def post_message(replication_request: ReplicationRequest):
 
 
 async def check_secondary_health():
-    while True:  
-        for secondary in SECONDARIES:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(f"{secondary}/health/")
-                    secondary_health[secondary] = "Healthy" if response.status_code == 200 else "Suspected"
-            except httpx.RequestError as ex:
-                logger.error(f"Health check failed for {secondary}: {str(ex)}")
-                secondary_health[secondary] = "Unhealthy"
-        await asyncio.sleep(10)
+    for secondary in SECONDARIES:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{secondary}/health/")
+                secondary_health[secondary] = "Healthy" if response.status_code == 200 else "Suspected"
+        except httpx.RequestError as ex:
+            logger.error(f"Health check failed for {secondary}: {str(ex)}")
+            secondary_health[secondary] = "Unhealthy"
+    asyncio.get_event_loop().call_later(HEALTH_CHECK_INTERVAL, asyncio.create_task, check_secondary_health())
 
 
 @app.on_event("startup")
