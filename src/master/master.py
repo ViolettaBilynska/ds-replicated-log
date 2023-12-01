@@ -68,7 +68,6 @@ async def post_message(replication_request: ReplicationRequest):
             asyncio.create_task(replicate_to_secondary(secondary, replication_request.message.content))
         return {"status": "success", "detail": "Message replicated with write concern 1"}
 
-    # Semaphore for write concern management
     acks_needed = replication_request.write_concern - 1
     semaphore = asyncio.Semaphore(0)
     replication_tasks = []
@@ -78,13 +77,13 @@ async def post_message(replication_request: ReplicationRequest):
         replication_tasks.append(task)
 
     successful_acks = 1  # Ack from the master is always considered received
-    for _ in range(acks_needed):
-        await semaphore.acquire()
-        successful_acks += 1
-
-    for task in replication_tasks:
-        if not task.done():
-            task.cancel()
+    replication_timeout = 10  # seconds
+    try:
+        for _ in range(acks_needed):
+            await asyncio.wait_for(semaphore.acquire(), timeout=replication_timeout)
+            successful_acks += 1
+    except asyncio.TimeoutError:
+        logger.warning("Timeout reached while waiting for replication acknowledgments.")
 
     if successful_acks >= replication_request.write_concern:
         return {"status": "success",
