@@ -13,12 +13,13 @@ messages = []
 sequence_id = 0
 
 SECONDARIES = os.environ.get("SECONDARIES", "").split(',')
-
 secondary_health = {secondary: "Unknown" for secondary in SECONDARIES}
+message_queues = {sec: [] for sec in SECONDARIES}
 
 HEALTH_CHECK_INTERVAL = 10
 SUSPECTED_THRESHOLD = 3
-
+MAX_RETRIES = 5
+RETRY_BACKOFF_FACTOR = 0.5
 shutdown_signal = asyncio.Event()
 
 logger = get_logger(__name__)
@@ -27,7 +28,7 @@ logger = get_logger(__name__)
 async def replicate_to_secondary(secondary, content):
     timeout_config = httpx.Timeout(10.0, read=None)
     async with httpx.AsyncClient(timeout=timeout_config) as client:
-        for attempt in range(3):
+        for attempt in range(MAX_RETRIES):
             try:
                 response = await client.post(f"{secondary}/replicate/", json={"content": content})
                 if response.status_code == 200:
@@ -36,24 +37,29 @@ async def replicate_to_secondary(secondary, content):
                 else:
                     logger.warning(
                         f"Replication to {secondary} returned status {response.status_code} on attempt {attempt + 1}.")
-            except httpx.RequestError as ex:
+            except Exception as ex:
                 logger.error(f"Replication to {secondary} failed on attempt {attempt + 1}: {repr(ex)}")
-            await asyncio.sleep(1)  # Wait for 1 second before retrying
-    logger.error(f"Failed to replicate to {secondary} after 3 attempts.")
+            await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+    logger.error(f"Failed to replicate to {secondary} after {MAX_RETRIES} attempts.")
     return False
 
 
-@app.post("/")
+async def queue_message_for_secondary(secondary, message):
+    message_queues[secondary].append(message)
+
+
+async def process_message_queue(secondary):
+    while message_queues[secondary]:
+        message = message_queues[secondary].pop(0)
+        await replicate_to_secondary(secondary, message.content)
+
+
 async def post_message(replication_request: ReplicationRequest):
     global sequence_id
-
     max_write_concern = len(SECONDARIES) + 1
-    if replication_request.write_concern > max_write_concern:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Write concern too high. Maximum allowed is {max_write_concern}"
-        )
 
+    if replication_request.write_concern > max_write_concern:
+        raise HTTPException(status_code=400, detail=f"Write concern too high. Maximum allowed is {max_write_concern}")
     if any(msg.id == replication_request.message.id for msg in messages):
         logger.info(f"Duplicate message ID received: {replication_request.message.id}, ignoring.")
         return {"status": "success", "detail": "Duplicate message, already replicated."}
@@ -73,26 +79,23 @@ async def post_message(replication_request: ReplicationRequest):
     replication_tasks = []
 
     for secondary in SECONDARIES:
-        task = asyncio.create_task(replicate_and_release(secondary, replication_request.message.content, semaphore))
-        replication_tasks.append(task)
+        if secondary_health[secondary] == "Healthy":
+            task = asyncio.create_task(replicate_and_release(secondary, replication_request.message.content, semaphore))
+            replication_tasks.append(task)
+        else:
+            await queue_message_for_secondary(secondary, replication_request.message)
 
-    successful_acks = 1  # Ack from the master is always considered received
-    replication_timeout = 10  # seconds
-    try:
-        for _ in range(acks_needed):
-            await asyncio.wait_for(semaphore.acquire(), timeout=replication_timeout)
-            successful_acks += 1
-    except asyncio.TimeoutError:
-        logger.warning("Timeout reached while waiting for replication acknowledgments.")
+    successful_acks = 1
+    for _ in range(acks_needed):
+        await semaphore.acquire()
+        successful_acks += 1
 
     if successful_acks >= replication_request.write_concern:
         return {"status": "success",
                 "detail": f"Message replicated with write concern {replication_request.write_concern}"}
     else:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Write concern not met. Required: {replication_request.write_concern}, received: {successful_acks} ACKs."
-        )
+        raise HTTPException(status_code=500,
+                            detail=f"Write concern not met. Required: {replication_request.write_concern}, received: {successful_acks} ACKs.")
 
 
 async def replicate_and_release(secondary, content, semaphore):
@@ -129,6 +132,8 @@ async def check_secondary_health():
         health_check_results = await asyncio.gather(*health_check_tasks)
 
         for secondary, status in health_check_results:
+            if secondary_health[secondary] != "Healthy" and status == "Healthy":
+                asyncio.create_task(process_message_queue(secondary))
             secondary_health[secondary] = status
 
         await asyncio.sleep(HEALTH_CHECK_INTERVAL)
