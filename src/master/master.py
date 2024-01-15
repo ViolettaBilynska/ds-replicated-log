@@ -25,6 +25,11 @@ shutdown_signal = asyncio.Event()
 logger = get_logger(__name__)
 
 
+def has_quorum():
+    healthy_secondaries = sum(1 for status in secondary_health.values() if status == "Healthy")
+    return healthy_secondaries >= len(SECONDARIES) // 2
+
+
 async def replicate_to_secondary(secondary, content):
     timeout_config = httpx.Timeout(10.0, read=None)
     async with httpx.AsyncClient(timeout=timeout_config) as client:
@@ -58,6 +63,9 @@ async def post_message(replication_request: ReplicationRequest):
     global sequence_id
     max_write_concern = len(SECONDARIES) + 1
 
+    if not has_quorum():
+        raise HTTPException(status_code=503, detail="No quorum available, master is in read-only mode.")
+
     if replication_request.write_concern > max_write_concern:
         raise HTTPException(status_code=400, detail=f"Write concern too high. Maximum allowed is {max_write_concern}")
     if any(msg.id == replication_request.message.id for msg in messages):
@@ -76,6 +84,7 @@ async def post_message(replication_request: ReplicationRequest):
 
     acks_needed = replication_request.write_concern - 1
     semaphore = asyncio.Semaphore(0)
+
     replication_tasks = []
 
     for secondary in SECONDARIES:
@@ -83,8 +92,8 @@ async def post_message(replication_request: ReplicationRequest):
             task = asyncio.create_task(replicate_and_release(secondary, replication_request.message.content, semaphore))
             replication_tasks.append(task)
         else:
+            logger.info(f"Secondary {secondary} is not healthy, skipping replication.")
             await queue_message_for_secondary(secondary, replication_request.message)
-
     successful_acks = 1
     for _ in range(acks_needed):
         await semaphore.acquire()
